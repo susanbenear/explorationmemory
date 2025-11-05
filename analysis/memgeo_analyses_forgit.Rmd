@@ -1,0 +1,900 @@
+---
+title: "MemGeo Preliminary Analyses for CogSci 2025"
+output: html_notebook
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F, warning = F, message = F, cache = T)
+
+library(dplyr)
+library(readr)
+library(tidyr)
+library(ggplot2)
+library(tibble)
+library(lme4)
+library(lmerTest)
+library(ggeffects)
+library(performance)
+
+base_theme <- theme_get() +
+  theme(text = element_text(family = "Avenir"))
+```
+
+### Create a merged data file with GPS, MST, and subjective novelty data
+```{r}
+# file paths
+final_data_path <- "/MemGeo Study/Data/MST/Weekly MST/trial_level_data_july2025.csv"
+gps_parameters_path <- "/MemGeo Study/Data/GPS Data/gps_csv_files_7.16.25/gps_entropy/GPS_parameters.csv"
+nov_data_path <- "/MemGeo Study/Data/Processed_Novelty_Survey_7.21.25.csv"
+mst_summary_path <- "/MemGeo Study/Data/MST/Day 1 MST/aggregated_data/MSTDay1_aggregate_7_21_25.csv"
+mh_surveys <- "/MemGeo Study/Data/Qualtrics Questionnaires/cleaned_MemGeo_Psychopathology_7.21.25.csv"
+output_path <- "/MemGeo Study/Data/mst_triallevel_geolocation_7.21.25.csv"
+
+# load data
+final_data <- read_csv(final_data_path, show_col_types = FALSE)
+gps_parameters <- read_csv(gps_parameters_path, show_col_types = FALSE)
+nov_data <- read_csv(nov_data_path, show_col_types = FALSE)
+mst_summary <- read_csv(mst_summary_path, show_col_types = FALSE)
+mh_data <- read_csv(mh_surveys, show_col_types = FALSE)
+
+# standardize participant ID and date formats
+final_data$participant_ID <- as.character(final_data$participant_ID)
+gps_parameters$part_id <- as.character(gps_parameters$partid)
+nov_data$participant_ID <- as.character(nov_data$participant_ID)
+mst_summary$participant_ID <- as.character(mst_summary$participant_ID)
+mh_data$participant_ID <- as.character(mh_data$participant_ID)
+
+# rename columns in final_data 
+colnames(final_data)[colnames(final_data) == "Date"] <- "date"
+colnames(final_data)[colnames(final_data) == "Time"] <- "time"
+
+# convert date formats
+final_data$date <- as.Date(final_data$date, format = "%m/%d/%Y")
+gps_parameters$date <- as.Date(gps_parameters$date, format = "%m/%d/%y")
+nov_data$date <- as.Date(nov_data$date, format = "%m/%d/%y")
+
+# log-transform novelty
+gps_parameters <- gps_parameters %>%
+  group_by(partid, date) %>%
+  mutate(novelty_log = log1p(novelty)) %>%
+  ungroup()
+
+# scale gps data with full sample
+gps_parameters$RE_btwn_z <- scale(gps_parameters$RE, center = TRUE, scale = TRUE)
+gps_parameters$novelty_z <- scale(gps_parameters$novelty, center = TRUE, scale = TRUE)
+gps_parameters$novelty_log_z <- scale(gps_parameters$novelty_log, center = TRUE, scale = TRUE)
+
+# time column format
+final_data$time <- as.character(final_data$time)
+nov_data$time <- as.character(nov_data$time)
+
+# remove duplicate rows from GPS & Novelty Data
+gps_parameters <- gps_parameters %>%
+  distinct(part_id, date, .keep_all = TRUE)  # Ensure only 1 row per participant per date
+
+nov_data <- nov_data %>%
+  distinct(participant_ID, date, time, .keep_all = TRUE)  # Ensure only 1 row per participant per date & time
+
+# merge GPS Data only by participant_ID and date
+gps_data_filled <- final_data %>%
+  left_join(gps_parameters %>% rename(participant_ID = part_id), by = c("participant_ID", "date"))
+
+# merge novelty survey data
+nov_data_summary <- nov_data %>%
+  group_by(participant_ID, date) %>%
+  summarise(
+    finished = first(finished), 
+    mood = first(mood),
+    sub_novelty = first(sub_novelty),
+    .groups = "drop")
+
+# merge
+merged_data <- gps_data_filled %>%
+  left_join(nov_data_summary, by = c("participant_ID", "date"))
+
+# merge REC and LDI - propagate across every row for the same participant
+merged_data <- merged_data %>%
+  left_join(mst_summary %>% select(participant_ID, REC, LDI), by = "participant_ID")
+
+merged_data <- merged_data %>%
+  left_join(mh_data %>%  select(participant_ID, MF_tot, SAS_tot, RRS_tot, SH_tot, SCA_tot, SCAA_tot), by = "participant_ID")
+
+# exclude bad pp (removed from study for lack of participation or other)
+participants_to_exclude <- c(171,234,459,783,844,1032,1687,2598,2700,3165,3739,3793,
+4029,4200,5285,6034,6045,6507,6560,6630,6705,6776,7157,7518,7658,7666,7802,7978,8123,
+8155,8181,8280,8281,8325,8387,8405,8499,8513,8564,8630,8646,8673,8735,9362,9737)
+
+merged_data <- merged_data %>%
+  filter(!participant_ID %in% participants_to_exclude)
+```
+
+
+### Create another merged data file with GPS and AM data
+```{r}
+# file paths
+gps_parameters_path <- "/MemGeo Study/Data/GPS Data/gps_csv_files_7.16.25/gps_entropy/GPS_parameters.csv"
+autobio_path <- "/MemGeo Study/Data/Autobio Memory/Transcripts/text_files/sentiment_scores_7.20.25.csv"
+output_path2 <- "/MemGeo Study/Data/am_geolocation_7.21.25.csv"
+
+# loaddata
+gps_parameters <- read_csv(gps_parameters_path, show_col_types = FALSE)
+autobio_data <- read_csv(autobio_path, show_col_types = FALSE)
+
+# exclude bad pp from gps (removed from study for lack of participation or other)
+participants_to_exclude <- c(171,234,459,783,844,1032,1687,2598,2700,3165,3739,3793,
+4029,4200,5285,6034,6045,6507,6560,6630,6705,6776,7157,7518,7658,7666,7802,7978,8123,
+8155,8181,8280,8281,8325,8387,8405,8499,8513,8564,8630,8646,8673,8735,9362,9737)
+
+gps_parameters <- gps_parameters %>%
+  filter(!partid %in% participants_to_exclude)
+
+# log-transform novelty
+gps_parameters <- gps_parameters %>%
+  group_by(partid, date) %>%
+  mutate(novelty_log = log1p(novelty)) %>%
+  ungroup()
+
+# scale gps data with full sample
+gps_parameters$RE_btwn_z <- scale(gps_parameters$RE, center = TRUE, scale = TRUE)
+gps_parameters$novelty_z <- scale(gps_parameters$novelty, center = TRUE, scale = TRUE)
+gps_parameters$novelty_log_z <- scale(gps_parameters$novelty_log, center = TRUE, scale = TRUE)
+
+# donvert date format
+gps_parameters$date <- as.Date(gps_parameters$date, format = "%m/%d/%y")
+autobio_data$date <- as.Date(autobio_data$date, format = "%m-%d-%y")
+
+# add 1 day to this to match the day the AM would be recalled that would be describing this day
+gps_parameters$lag_date <- gps_parameters$date + 1
+
+gps_parameters <- gps_parameters %>%
+  rename(participant_ID = partid, gps_date = date)
+gps_parameters$participant_ID <- as.character(gps_parameters$participant_ID)
+
+autobio_data <- autobio_data %>%
+  rename(participant_ID = participant_id)
+autobio_data$participant_ID <- as.character(autobio_data$participant_ID)
+
+#join based on LAG date - gps data from the day before the AM task
+merged_data_AM <- autobio_data %>%
+  left_join(
+    gps_parameters %>% select(participant_ID, lag_date, gps_date, RE, novelty, novelty_log, RE_btwn_z, novelty_z, novelty_log_z),
+    by = c("participant_ID", "date" = "lag_date"))
+
+### merge REC and LDI - propagate across every row for the same participant
+merged_data_AM <- merged_data_AM %>%
+  left_join(mst_summary %>% select(participant_ID, REC, LDI), by = "participant_ID")
+
+merged_data_AM <- merged_data_AM %>%
+  left_join(mh_data %>%  select(participant_ID, MF_tot, SAS_tot, RRS_tot, SH_tot, SCA_tot, SCAA_tot), by = "participant_ID")
+```
+
+
+### Create delayed memory variable and remove bad data
+```{r}
+mem_delay <- merged_data %>%
+  group_by(participant_ID, session) %>%
+  summarise(session_date = first(date), .groups = "drop") %>%
+  arrange(participant_ID, session_date) %>%
+  group_by(participant_ID) %>%
+  mutate(
+    session_lag = session - lag(session),
+    mem_delay = as.numeric(difftime(session_date, lag(session_date), units = "days"))
+  ) 
+
+merged_data <- merged_data %>%
+  left_join(mem_delay %>% select(participant_ID, session, session_lag, mem_delay), by = c("participant_ID", "session")) %>%
+  ungroup()
+
+# filter out invalid session jumps, too-long delays, and not enough AM
+merged_data <- merged_data %>%
+  filter(session_lag == 1, mem_delay > 0, mem_delay <= 7) %>%
+  ungroup()
+
+merged_data_AM <- merged_data_AM %>%
+  group_by(participant_ID) %>%
+  filter(n() > 1) %>%
+  ungroup()
+```
+
+
+### Create lag (encoding) RE, novelty, and sub_novelty
+```{r}
+# Compute session-level encoding values (one per session per participant)
+session_encodings <- merged_data %>%
+  group_by(participant_ID, session) %>%
+  summarise(
+    RE_enc = first(RE),  # Take the first RE value for the session
+    novelty_enc = first(novelty),  # Take the first novelty value
+    novelty_log_enc = first(novelty_log),
+    RE_enc_z = first(RE_btwn_z),  # Take the first RE value for the session
+    novelty_enc_z = first(novelty_z),  # Take the first novelty value
+    novelty_log_enc_z = first(novelty_log_z),
+    sub_nov_enc = first(sub_novelty),  # Take the first sub_novelty value
+    .groups = "drop"
+  ) %>%
+  arrange(participant_ID, session) %>%  # Ensure correct ordering
+  group_by(participant_ID) %>%
+  mutate(
+    RE_enc = lag(RE_enc),  # Assign current session RE to next session
+    novelty_enc = lag(novelty_enc),
+    novelty_log_enc = lag(novelty_log_enc),
+    RE_enc_z = lag(RE_enc_z),
+    novelty_enc_z = lag(novelty_enc_z),  
+    novelty_log_enc_z = lag(novelty_log_enc_z),
+    sub_nov_enc = lag(sub_nov_enc)  
+  ) %>%
+  ungroup()
+
+# Merge back to the main dataset to propagate values to all rows of the same session
+merged_data <- merged_data %>%
+  left_join(session_encodings, by = c("participant_ID", "session"))
+```
+
+### Create z-scored variables and old / lure datasets for modeling
+```{r}
+merged_data_AM <- merged_data_AM %>%
+  group_by(participant_ID, date) %>%
+  mutate(word_count_sqrt = sqrt(word_count)) %>%
+  ungroup()
+
+# remove rows where  session == 1 because all images are ne
+merged_data <- merged_data %>% filter(session != 1)
+
+# z-score variables
+merged_data$age_z <- scale(merged_data$age, center = TRUE, scale = TRUE)
+merged_data$mem_delay_z <- scale(merged_data$mem_delay, center = TRUE, scale = TRUE)
+merged_data$sub_nov_retr_z <- scale(merged_data$sub_novelty, center = TRUE, scale = TRUE)
+merged_data$sub_nov_enc_z <- scale(merged_data$sub_nov_enc, center = TRUE, scale = TRUE)
+merged_data_AM$age_z <- scale(merged_data_AM$age, center = TRUE, scale = TRUE)
+merged_data_AM$sentscr_z <- scale(merged_data_AM$sentscr, center = TRUE, scale = TRUE)
+merged_data_AM$word_count_z <- scale(merged_data_AM$word_count, center = TRUE, scale = TRUE)
+merged_data_AM$word_count_sqrt_z <- scale(merged_data_AM$word_count_sqrt, center = TRUE, scale = TRUE)
+
+#rename variables for clarity
+merged_data <- merged_data %>%
+  rename(RE_retr_z = RE_btwn_z,
+    novelty_retr_z = novelty_z,
+    novelty_log_retr_z = novelty_log_z)
+
+old_data <- merged_data %>% 
+  filter(condition == "TR")
+
+lure_data <- merged_data %>% 
+  filter(condition == "TL")
+
+```
+
+# compute avg's for person-level correlations MST
+```{r}
+# find participants with exactly 1 unique session
+single_session_ids <- merged_data %>%
+  group_by(participant_ID) %>%
+  summarise(unique_sessions = n_distinct(date)) %>%
+  filter(unique_sessions > 1) %>%
+  pull(participant_ID)
+
+# filter merged_data to remove those participants
+avg_data <- merged_data %>%
+  filter(participant_ID %in% single_session_ids) %>%
+  group_by(participant_ID) %>%
+  summarise(
+    RE = mean(RE, na.rm = TRUE),
+    novelty = mean(novelty, na.rm = TRUE),
+    sub_novelty = mean(sub_novelty, na.rm = TRUE),
+    mood = mean(mood, na.rm = TRUE),
+    accuracy = mean(accuracy, na.rm = TRUE),
+    REC = first(REC),
+    LDI = first(LDI),
+    age = first(age),
+    MF = first(MF_tot),
+    SCAA_tot = first(SCAA_tot),
+    SCA_tot = first(SCA_tot),
+    SAS_tot = first(SAS_tot),
+    SH_tot = first(SH_tot),
+    RRS_tot = first(RRS_tot))
+
+avg_data <- avg_data %>%
+  mutate(SCAA_tot2 = coalesce(SCAA_tot, SCA_tot))
+
+# compute avg's for person-level correlations for AM
+avg_data_AM <- merged_data_AM %>%
+  group_by(participant_ID) %>%
+  summarise(
+    RE = mean(RE, na.rm = TRUE),
+    novelty = mean(novelty, na.rm = TRUE),
+    age = first(age),
+    compound = mean(compound, na.rm = TRUE),
+    sentscr = mean(sentscr, na.rm = TRUE),
+    word_count = mean(word_count, na.rm = TRUE),
+    REC = first(REC),
+    LDI = first(LDI),
+    MF = first(MF_tot),
+    SCAA_tot = first(SCAA_tot),
+    SCA_tot = first(SCA_tot),
+    SAS_tot = first(SAS_tot),
+    SH_tot = first(SH_tot),
+    RRS_tot = first(RRS_tot))
+
+avg_data_AM <- avg_data_AM %>%
+  mutate(SCAA_tot2 = coalesce(SCAA_tot, SCA_tot))
+```
+
+# avg accuracy on old vs. lure trials
+```{r}
+avg_data_old <- merged_data %>%
+  filter(condition == "TR") %>%
+  group_by(participant_ID) %>%
+  summarise(
+    accuracy = mean(accuracy, na.rm = TRUE),
+    age = first(age))
+
+avg_data_lure <- merged_data %>%
+  filter(condition == "TL") %>%
+  group_by(participant_ID) %>%
+  summarise(
+    accuracy = mean(accuracy, na.rm = TRUE),
+    age = first(age))
+
+hist(avg_data_old$accuracy, breaks = 20, col = "lightblue", border = "black")
+hist(avg_data_lure$accuracy, breaks = 20, col = "lightblue", border = "black")
+```
+
+# histogram of age/gender of participants
+```{r}
+# Count unique participants per age and gender
+plot_data <- merged_data %>%
+  distinct(participant_ID, age, gender)
+
+# Plot stacked histogram
+
+ggplot(plot_data, aes(x = age, fill = gender)) +
+  geom_bar(position = "stack") +
+  scale_fill_manual(
+    values = c(
+      "Male" = "#1f77b4",    
+      "Female" = "hotpink2",   
+      "Other" = "orchid4"     
+    )
+  ) +
+ scale_y_continuous(expand = c(0, 0),breaks = seq(0, 10, by = 2))+
+scale_x_continuous(breaks = seq(min(plot_data$age), max(plot_data$age), by = 1))+
+  labs(
+    title = "",
+    x = "Age",
+    y = "Number of Participants",
+    fill = "Gender"
+  ) +
+  base_theme +
+  theme(axis.text.x = element_text(size = 14, colour = "black", hjust = .5),
+    axis.text.y = element_text(size = 14, colour = "black"),
+    axis.title.x = element_text(size=20),
+    axis.title.y = element_text(size=20),
+    panel.background = element_rect(fill = 'transparent'),
+    axis.line = element_line(color = 'black'),
+    strip.background = element_rect(colour = "black", fill = "transparent"),)
+
+```
+
+# gps novelty/re and sentiment + word count
+```{r}
+model1 <-lmer(sentscr_z ~ RE_btwn_z + (RE_btwn_z |participant_ID), data=merged_data_AM)
+summary(model1) 
+model2 <- lmer(sentscr_z ~ novelty_log_z + (novelty_log_z | participant_ID), data = merged_data_AM)
+summary(model2) 
+```
+
+# plot GPS Nov & AM sentiment
+```{r}
+modelplot2 <- lmer(sentscr ~ novelty_log + (novelty_log | participant_ID), data = merged_data_AM)
+summary(modelplot2)
+
+# fixed effects
+fixed_intercept <- fixef(modelplot2)[1]
+fixed_slope <- fixef(modelplot2)[2]
+
+# random effects per participant
+ranef_df <- ranef(modelplot2)$participant_ID %>%
+  rownames_to_column("participant_ID") %>%
+  rename(rand_intercept = `(Intercept)`, rand_slope = novelty_log) %>%
+  mutate(
+    intercept = fixed_intercept + rand_intercept,
+    slope = fixed_slope + rand_slope
+  )
+
+# merge with original data
+plot_data <- left_join(merged_data_AM, ranef_df, by = "participant_ID")
+
+# for ribbon
+new_data <- data.frame(novelty_log = seq(min(merged_data_AM$novelty_log, na.rm = TRUE),
+                                     max(merged_data_AM$novelty_log, na.rm = TRUE),
+                                     length.out = 100))
+
+# predict from fixed effects only
+new_data$pred <- predict(modelplot2, newdata = new_data, re.form = NA)
+
+# compute standard error and 95% CI
+vcov_mat <- vcov(modelplot2)
+X <- model.matrix(~ novelty_log, data = new_data)
+se <- sqrt(diag(X %*% vcov_mat %*% t(X)))
+new_data$lower <- new_data$pred - 1.96 * se
+new_data$upper <- new_data$pred + 1.96 * se
+
+# plot
+combined_plot <- ggplot() +
+  # Raw data points
+  #geom_point(data = merged_data_AM1, aes(x = novelty, y = sentscr),
+   #          color = "#6aa16a", alpha = 0.6, size = 3) +
+  # Participant-level random slopes
+  geom_line(data = plot_data, aes(x = novelty_log, y = intercept + slope * novelty_log, group = participant_ID),
+            alpha = 0.2) +
+  # Fixed-effect confidence ribbon
+  geom_ribbon(data = new_data, aes(x = novelty_log, ymin = lower, ymax = upper),
+              fill = "#6aa16a", alpha = 0.2) +
+  # Fixed-effect regression line
+  geom_line(data = new_data, aes(x = novelty_log, y = pred),
+            color = "#6aa16a", size = 1.2) +
+  # Labels and theme
+  labs(x = "GPS Novelty (Log)", y = "AM Sentiment Score") +
+  #xlim(0, 200) +
+  ylim(-.5, 0.9) +
+  base_theme +
+  theme(axis.text.x = element_text(size = 14, colour = "black", hjust = 0.5),
+    axis.text.y = element_text(size = 14, colour = "black"),
+    axis.title.x = element_text(size = 20),
+    axis.title.y = element_text(size = 20),
+    axis.line = element_line(color = 'black'),
+    panel.background = element_rect(fill = 'transparent'),
+    strip.background = element_rect(colour = "black", fill = "transparent"))
+combined_plot
+
+```
+
+# gps novelty/re and word count
+```{r}
+model1 <-lmer(word_count_sqrt_z ~ RE_btwn_z + (RE_btwn_z | participant_ID), data=merged_data_AM)
+summary(model1) 
+model2 <-lmer(word_count_sqrt_z ~ novelty_log_z + (novelty_log_z|participant_ID), data=merged_data_AM)
+summary(model2)
+```
+
+# plot GPS RE & AM word could
+```{r}
+# 1. model
+modelplot1 <- lmer(word_count_sqrt ~ RE + (RE | participant_ID), data = merged_data_AM)
+
+# fixed effects
+fixed_intercept <- fixef(modelplot1)[1]
+fixed_slope <- fixef(modelplot1)[2]
+
+# random effects per participant
+ranef_df1 <- ranef(modelplot1)$participant_ID %>%
+  rownames_to_column("participant_ID") %>%
+  rename(rand_intercept = `(Intercept)`, rand_slope = RE) %>%
+  mutate(
+    intercept = fixed_intercept + rand_intercept,
+    slope = fixed_slope + rand_slope
+  )
+
+#  merge
+plot_data1 <- left_join(merged_data_AM, ranef_df1, by = "participant_ID")
+
+# ribbon
+new_data <- data.frame(RE = seq(min(merged_data_AM$RE, na.rm = TRUE),
+                                max(merged_data_AM$RE, na.rm = TRUE),
+                                length.out = 100))
+
+# predict from fixed effects only
+new_data$pred <- predict(modelplot1, newdata = new_data, re.form = NA)
+
+# standard error and 95% CI
+vcov_mat <- vcov(modelplot1)
+X <- model.matrix(~ RE, data = new_data)
+se <- sqrt(diag(X %*% vcov_mat %*% t(X)))
+new_data$lower <- new_data$pred - 1.96 * se
+new_data$upper <- new_data$pred + 1.96 * se
+
+# plot
+combined_plot <- ggplot() +
+  # Raw data points
+  #geom_point(data = merged_data_AM, aes(x = RE, y = word_count),
+      #       color = "#6aa16a", alpha = 0.6, size = 3) +
+  # Random slopes per participant
+  geom_line(data = plot_data1,
+            aes(x = RE, y = intercept + slope * RE, group = participant_ID),
+            alpha = 0.2) +
+  # Fixed-effect ribbon
+  geom_ribbon(data = new_data, aes(x = RE, ymin = lower, ymax = upper),
+              fill = "#6aa16a", alpha = 0.2) +
+  # Fixed-effect line
+  geom_line(data = new_data, aes(x = RE, y = pred),
+            color = "#6aa16a", size = 1.2) +
+  # Labels and theme
+  labs(x = "GPS RE", y = "AM Word Count (Sqrt)") +
+  base_theme +
+  theme(
+    axis.text.x = element_text(size = 14, colour = "black", hjust = 0.5),
+    axis.text.y = element_text(size = 14, colour = "black"),
+    axis.title.x = element_text(size = 20),
+    axis.title.y = element_text(size = 20),
+    axis.line = element_line(color = 'black'),
+    panel.background = element_rect(fill = 'transparent'),
+    strip.background = element_rect(colour = "black", fill = "transparent"))
+# Show the plot
+combined_plot
+
+```
+
+# mental health with AM sentiment
+```{r}
+correlation1 <- suppressWarnings(cor.test(avg_data_AM$sentscr, avg_data_AM$MF, use = "complete.obs", method = "spearman"))
+print(correlation1)
+correlation2 <- suppressWarnings(cor.test(avg_data_AM$sentscr, avg_data_AM$SCAA_tot2, use = "complete.obs", method = "spearman"))
+print(correlation2)
+
+#  plot
+ggplot(avg_data_AM, aes(x = MF, y = sentscr )) +
+  geom_point(color = "#6aa16a", size = 3, alpha=.8) +  # Scatter points
+  geom_smooth(method = "lm", color = "#6aa16a", fill = "#6aa16a", se = TRUE) +  # Linear model with ribbon
+  labs(
+    x = "Moods & Feelings Score",
+    y = "Avg. AM Sentiment Score") +
+  base_theme+
+  theme(axis.text.x = element_text(size = 14, colour = "black", hjust = 0.5),
+    axis.text.y = element_text(size = 14, colour = "black"),
+    axis.title.x = element_text(size = 20),
+    axis.title.y = element_text(size = 20),
+    panel.background = element_rect(fill = 'transparent'),
+    axis.line = element_line(color = 'black'),
+    strip.background = element_rect(colour = "black", fill = "transparent"))
+
+
+# plot
+ggplot(avg_data_AM, aes(x = SCAA_tot2, y = sentscr)) +
+  geom_point(color = "#6aa16a", size = 3, alpha=.8) +  # Scatter points
+  geom_smooth(method = "lm", color = "#6aa16a", fill = "#6aa16a", se = TRUE) +  # Linear model with ribbon
+  labs(
+    x = "SCA(A)RED Score",
+    y = "Avg. AM Sentiment Score") +
+  base_theme+
+  theme(axis.text.x = element_text(size = 14, colour = "black", hjust = 0.5),
+    axis.text.y = element_text(size = 14, colour = "black"),
+    axis.title.x = element_text(size = 20),
+    axis.title.y = element_text(size = 20),
+    panel.background = element_rect(fill = 'transparent'),
+    axis.line = element_line(color = 'black'),
+    strip.background = element_rect(colour = "black", fill = "transparent"))
+
+```
+
+# mental health with AM word count
+```{r}
+correlation1 <- suppressWarnings(cor.test(avg_data_AM$word_count, avg_data_AM$MF, use = "complete.obs", method = "spearman"))
+print(correlation1)
+correlation2 <- suppressWarnings(cor.test(avg_data_AM$word_count, avg_data_AM$SCAA_tot2, use = "complete.obs", method = "spearman"))
+print(correlation2)
+
+# plot
+ggplot(avg_data_AM, aes(x = MF, y = word_count)) +
+  geom_point(color = "#6aa16a", size = 3, alpha=.8) +  # Scatter points
+  geom_smooth(method = "lm", color = "#6aa16a", fill = "#6aa16a", se = TRUE) +  # Linear model with ribbon
+  labs(
+    x = "Moods & Feelings Score",
+    y = "Avg. AM Word Count") +
+  base_theme+
+   theme(axis.text.x = element_text(size = 14, colour = "black", hjust = 0.5),
+    axis.text.y = element_text(size = 14, colour = "black"),
+    axis.title.x = element_text(size = 20),
+    axis.title.y = element_text(size = 20),
+    panel.background = element_rect(fill = 'transparent'),
+    axis.line = element_line(color = 'black'),
+    strip.background = element_rect(colour = "black", fill = "transparent"))
+
+# plot
+ggplot(avg_data_AM, aes(x = SCAA_tot2, y = word_count )) +
+    geom_point(color = "#6aa16a", size = 3, alpha=.8) +  # Scatter points
+  geom_smooth(method = "lm", color = "#6aa16a", fill = "#6aa16a", se = TRUE) +  # Linear model with ribbon
+  labs(
+    x = "SCA(A)RED Score",
+    y = "Avg. AM Word Count") +
+  base_theme+
+  theme(axis.text.x = element_text(size = 14, colour = "black", hjust = 0.5),
+    axis.text.y = element_text(size = 14, colour = "black"),
+    axis.title.x = element_text(size = 20),
+    axis.title.y = element_text(size = 20),
+    panel.background = element_rect(fill = 'transparent'),
+    axis.line = element_line(color = 'black'),
+    strip.background = element_rect(colour = "black", fill = "transparent"))
+```
+
+# make df for splitting the re/nov - memory correlation by MH
+```{r}
+mh_group_data <- merged_data %>%
+  group_by(participant_ID, date) %>%
+  summarise(
+    RE_enc = first(RE_enc),  # assumes RE is the same for all rows per participant/date
+    RE = first(RE),  
+    MF_tot = first(MF_tot), 
+    SCAA_tot = first(SCAA_tot), 
+    SCA_tot = first(SCA_tot), 
+    mood = first(mood), 
+    accuracy = mean(accuracy, na.rm = TRUE),  # average accuracy across rows
+    .groups = "drop"
+  )
+
+mh_group_data <- mh_group_data %>%
+  mutate(SCAA_tot2 = coalesce(SCAA_tot, SCA_tot))
+
+mh_group_data$RE_retr_z <- scale(mh_group_data$RE, center = TRUE, scale = TRUE)
+mh_group_data$RE_enc_z <- scale(mh_group_data$RE_enc, center = TRUE, scale = TRUE)
+mh_group_data$SCAA_tot2_z <- scale(mh_group_data$SCAA_tot2, center = TRUE, scale = TRUE)
+merged_data$mood_z <- scale(merged_data$mood, center = TRUE, scale = TRUE)
+
+# Create a grouping variable based on MFQ/SCAA
+mh_group_data <- mh_group_data %>%
+  mutate(MF_group = ifelse(MF_tot < 12, "healthy", "depression"))
+
+mh_group_data <- mh_group_data %>%
+  mutate(SCA_group = ifelse(SCAA_tot2 < 23, "healthy", "anxiety"))
+
+mh_group_data <- mh_group_data %>%
+  group_by(participant_ID) %>%
+  mutate(num_samples = n()) %>%
+  ungroup()
+```
+
+# re/nov predicting mood by mh
+```{r}
+model1 <-lmer(mood_z ~ RE_retr_z*SCAA_tot2_z + (RE_retr_z | participant_ID), data=merged_data)
+summary(model1) 
+model2 <-lmer(mood_z ~ novelty_retr_z*SCAA_tot2_z + (novelty_retr_z | participant_ID), data=merged_data)
+summary(model2) 
+model3 <-lmer(mood_z ~ sub_nov_retr_z*SCAA_tot2_z + (sub_nov_retr_z | participant_ID), data=merged_data)
+summary(model3) 
+```
+
+# plot mood by novelty * mh
+```{r}
+merged_data$SCA_group <- relevel(factor(merged_data$SCA_group), ref = "healthy")
+
+model_cat <- lmer(mood ~ sub_novelty * SCA_group + (sub_novelty | participant_ID), data = merged_data)
+
+plot_grid_cat <- expand.grid(
+  sub_novelty = seq(min(merged_data$sub_novelty, na.rm=TRUE),
+                       max(merged_data$sub_novelty, na.rm=TRUE),
+                       length.out = 100),
+  SCA_group = unique(merged_data$SCA_group))
+
+# predict fixed effect values from model coefficients
+fixef_vals <- fixef(model_cat)
+
+plot_grid_cat <- plot_grid_cat %>%
+  mutate(
+    pred_fixed = fixef_vals["(Intercept)"] +
+                 fixef_vals["sub_novelty"] * sub_novelty +
+                 ifelse(SCA_group == levels(merged_data$SCA_group)[2], 
+                        fixef_vals["SCA_groupanxiety"], 0) +  
+                 ifelse(SCA_group == levels(merged_data$SCA_group)[2],
+                        fixef_vals["sub_novelty:SCA_groupanxiety"] * sub_novelty, 0))
+
+ranef_df <- ranef(model_cat)$participant_ID %>%
+  rownames_to_column("participant_ID") %>%
+  rename(rand_intercept = `(Intercept)`, rand_slope_sub_nov = sub_novelty) %>%
+  mutate(
+    intercept = fixef_vals[1] + rand_intercept,
+    slope_sub_nov = fixef_vals["sub_novelty"] + rand_slope_sub_nov)
+
+# join pp level random eff with original data to plot individual slopes 
+ggplot() +
+  #geom_point(data = merged_data, aes(x = sub_novelty, y = mood_z, color = SCA_group), alpha = 0.5) +
+  geom_line(data = merged_data %>%
+              left_join(ranef_df, by = "participant_ID") %>%
+              mutate(pred = intercept + slope_sub_nov * sub_novelty),
+            aes(x = sub_novelty, y = pred, group = participant_ID), color = "gray", alpha = 0.3) +
+  geom_line(data = plot_grid_cat,
+            aes(x = sub_novelty, y = pred_fixed, color = SCA_group),
+            size = 1.5) +
+    scale_color_manual(
+    values = c("healthy" = "#6aa16a", "anxiety" = "#a8d5a8"),
+    name = "Group",  # Custom legend title
+    labels = c("healthy" = "Healthy", "anxiety" = "Anxious")) +
+  labs(x = "Subjective Novelty", y = "Mood") +
+base_theme+
+    theme(axis.text.x = element_text(size = 14, colour = "black", hjust = 0.5),
+    axis.text.y = element_text(size = 14, colour = "black"),
+    axis.title.x = element_text(size = 20),
+    axis.title.y = element_text(size = 20),
+    panel.background = element_rect(fill = 'transparent'),
+    axis.line = element_line(color = 'black'),
+    strip.background = element_rect(colour = "black", fill = "transparent"))
+```
+
+# IMAGE MEMORY MODELS
+```{r}
+# remove new trials
+no_foils_data  <- merged_data %>% 
+  filter(condition != "TF")
+
+# relevel
+no_foils_data$condition <- relevel(factor(no_foils_data$condition), ref = "TR")
+
+# Custom green color palette
+green_palette <- c("#a8d5a8", "#6aa16a", "#3f6b3f")
+```
+
+# GPS RE
+```{r}
+mod_RE <- glmer(accuracy ~  age_z*condition*mem_delay_z*RE_enc_z*RE_retr_z + (1 | participant_ID), data = no_foils_data, family = binomial, control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 1e6)))
+
+summary(mod_RE)
+
+#check_collinearity(mod_RE)
+```
+
+```{r}
+plotmod_re <- glmer(accuracy ~ condition*age*mem_delay*RE_enc*RE + (1 | participant_ID), data = no_foils_data, family = binomial, control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 1e6)))
+
+# Generate predicted values from the model
+interaction_preds <- ggpredict(
+  plotmod_re,  terms = c("mem_delay [1:7 by=1]", "RE [0, .1, .2]", "RE_enc [0, .1, .2]"))
+
+# Optional: Custom labels for encoding novelty
+enc_labels <- c(
+  `0` = "Encoding RE= 0",
+  `0.1`  = "Encoding RE= .1",
+  `0.2`  = "Encoding RE= .2")
+
+# Plot
+plotre<-ggplot(interaction_preds, aes(x = x, y = predicted, color = group)) +
+  geom_line(size = 1.2) +
+    geom_hline(yintercept = 0.33, linetype = "dashed", color = "gray40") + # chance line
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high, fill = group), alpha = 0.2, color = NA) +
+  facet_wrap(~facet, labeller = as_labeller(enc_labels)) +
+  scale_color_manual(values = green_palette) +
+  scale_fill_manual(values = green_palette) +
+  ylim(0,1)+
+  scale_x_continuous(breaks = 1:7)+
+  labs(
+    x = "Memory Delay (Days)",
+    y = "Predicted Accuracy",
+    color = "Retrieval RE",
+    fill = "Retrieval RE") +
+base_theme +
+  theme(
+    axis.text.x = element_text(size = 12, colour = "black", hjust = 0.5),
+    axis.text.y = element_text(size = 12, colour = "black"),
+    legend.text = element_text(size = 12),
+    axis.title.x = element_text(size = 18),
+    axis.title.y = element_text(size = 20),
+    legend.title = element_text(size = 14),
+    strip.text = element_text(size = 12),
+    panel.background = element_rect(fill = 'transparent'),
+    axis.line = element_line(color = 'black'),
+    strip.background = element_rect(colour = "black", fill = "transparent"))
+plotre
+```
+
+# GPS Nov
+```{r}
+mod_gpsnov <- glmer(accuracy ~  age_z*condition*mem_delay_z*novelty_log_enc_z*novelty_log_retr_z + (1 | participant_ID), data = no_foils_data, family = binomial, control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 1e6)))
+
+summary(mod_gpsnov)
+```
+
+```{r}
+plotmod_gpsnov <- glmer(accuracy ~ condition*age*mem_delay*novelty_log_enc*novelty_log + (1 | participant_ID), data = no_foils_data, family = binomial, control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 1e6)))
+
+# Generate predicted values from the model
+interaction_preds <- ggpredict(
+  plotmod_gpsnov,  terms = c("age", "condition [TR, TL]"))
+
+# Plot
+plotgpsnov<-ggplot(interaction_preds, aes(x = x, y = predicted, color = group)) +
+  geom_line(size = 1.2) +
+  geom_hline(yintercept = 0.33, linetype = "dashed", color = "gray40") + # chance line
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high, fill = group), alpha = 0.2, color = NA) +
+    scale_color_manual(values = green_palette,labels = c("TL" = "Sim. Lure", "TR" = "Repeat")) +
+  scale_fill_manual(values = green_palette,labels = c("TL" = "Sim. Lure", "TR" = "Repeat")) +
+  ylim(0,1)+
+   labs(
+     x = "age",
+     y = "Predicted Accuracy" ,
+     color = "Test Item Type",
+     fill = "Test Item Type") +
+base_theme +
+  theme(
+    axis.text.x = element_text(size = 12, colour = "black", hjust = 0.5),
+    axis.text.y = element_text(size = 12, colour = "black"),
+    legend.text = element_text(size = 12),
+    axis.title.x = element_text(size = 18),
+    axis.title.y = element_text(size = 20),
+    legend.title = element_text(size = 14),
+    strip.text = element_text(size = 12),
+    panel.background = element_rect(fill = 'transparent'),
+    axis.line = element_line(color = 'black'),
+    strip.background = element_rect(colour = "black", fill = "transparent"))
+plotgpsnov
+```
+
+# Sub Nov
+```{r}
+mod_subnov <- glmer(accuracy ~  age_z*condition*mem_delay_z*sub_nov_enc_z*sub_nov_retr_z + (1 | participant_ID), data = no_foils_data, family = binomial, control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 1e6)))
+
+summary(mod_subnov)
+```
+
+```{r}
+plotmod_subnov <- glmer(accuracy ~ condition*age*mem_delay*sub_nov_enc*sub_novelty + (1 | participant_ID), data = no_foils_data, family = binomial, control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 1e6)))
+
+# Generate predicted values from the model
+interaction_preds <- ggpredict(
+  plotmod_subnov,  terms = c("mem_delay [1:7 by=1]", "sub_novelty [0, 5, 10]", "sub_nov_enc [0, 5, 10]"))
+
+# Optional: Custom labels for encoding novelty
+enc_labels <- c(
+  `0` = "Encoding Sub. Nov.= 0",
+  `5`  = "Encoding Sub. Nov.= 5",
+  `10`  = "Encoding Sub. Nov.= 10")
+
+# Plot
+plotsubnov<-ggplot(interaction_preds, aes(x = x, y = predicted, color = group)) +
+  geom_line(size = 1.2) +
+    geom_hline(yintercept = 0.33, linetype = "dashed", color = "gray40") + # chance line
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high, fill = group), alpha = 0.2, color = NA) +
+  facet_wrap(~facet, labeller = as_labeller(enc_labels)) +
+  scale_color_manual(values = green_palette) +
+  scale_fill_manual(values = green_palette) +
+  ylim(0,1)+
+  scale_x_continuous(breaks = 1:7)+
+  labs(
+    x = "Memory Delay (Days)",
+    y = "Predicted Accuracy",
+    color = "Retrieval\nSub. Nov.",
+    fill = "Retrieval\nSub. Nov.") +
+base_theme +
+  theme(
+    axis.text.x = element_text(size = 12, colour = "black", hjust = 0.5),
+    axis.text.y = element_text(size = 12, colour = "black"),
+    legend.text = element_text(size = 12),
+    axis.title.x = element_text(size = 18),
+    axis.title.y = element_text(size = 20),
+    legend.title = element_text(size = 14),
+    strip.text = element_text(size = 12),
+    panel.background = element_rect(fill = 'transparent'),
+    axis.line = element_line(color = 'black'),
+    strip.background = element_rect(colour = "black", fill = "transparent"))
+plotsubnov
+```
+
+
+# plot image memory response type histogram
+```{r}
+# contingency table 
+contingency_table <- table(merged_data$response, merged_data$condition)
+
+contingency_df <- as.data.frame(contingency_table)
+
+# rename variables
+colnames(contingency_df) <- c("response", "condition", "count")
+
+# plot
+ggplot(contingency_df, aes(x = condition, y = count, fill = response)) +
+  geom_col(position = position_dodge(width = .9), color = "black") +
+  scale_x_discrete(labels = c("TR"="Repeat/Old Items", "TL"="Lure/Similar Items","TF"="Foil/New Items")) +
+  scale_fill_manual(values = c("0" = "#a8d5a8", "1" = "#6aa16a", "2" = "#3f6b3f"),
+                    labels = c("0"="Old", "1"="Similar","2"="New")) +
+  labs(x = "Stimulus Type", y = "Number of Responses", fill = "Response\nType") +
+ # ggtitle("Incorrect Responses")+
+  scale_y_continuous(expand = c(0, 0)) +
+  #coord_cartesian(ylim = c(5000, NA))
+  base_theme +
+  theme(
+    axis.text.x = element_text(size = 14, colour = "black", hjust = 0.5),
+    axis.text.y = element_text(size = 0, colour = "black"),
+    legend.text = element_text(size = 12),
+    axis.title.x = element_text(size = 18),
+    axis.title.y = element_text(size = 20),
+    legend.title = element_text(size = 16),
+    panel.background = element_rect(fill = 'transparent'),
+    axis.line = element_line(color = 'black'),
+    strip.background = element_rect(colour = "black", fill = "transparent"))
+```
