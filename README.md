@@ -1,3 +1,3 @@
-# MemGeo
+# Real-world exploration and memory across development
 
-Repository for storing data and code for the MemGeo project
+This repo contains data and code for preliminary analyses conducted for a [poster]([url](https://drive.google.com/file/d/14N_-hVCA649Gkg_kNZ-1yA8pkPeGvpwH/view?usp=drive_link)) presented at the 2025 Cognitive Science Society Conference.
